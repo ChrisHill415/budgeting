@@ -1,10 +1,11 @@
 import hashlib
-import hmac
 import json
 import os
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +15,8 @@ ROOT = Path(__file__).parent
 DB_PATH = Path(os.environ.get("BUDGET_DB", ROOT / "budgeting.db"))
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE = "ledgerly_session"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 
 
 def connect():
@@ -28,7 +31,8 @@ def init_db():
         db.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE,
-            salt BLOB NOT NULL, password_hash BLOB NOT NULL, created_at INTEGER NOT NULL
+            salt BLOB NOT NULL, password_hash BLOB NOT NULL, created_at INTEGER NOT NULL,
+            supabase_user_id TEXT UNIQUE
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -52,6 +56,52 @@ def init_db():
         CREATE INDEX IF NOT EXISTS tx_user_date ON transactions(user_id, date DESC);
         CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
         """)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+        if "supabase_user_id" not in columns:
+            db.execute("ALTER TABLE users ADD COLUMN supabase_user_id TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_supabase_id ON users(supabase_user_id)")
+
+
+def supabase_auth(action, email, password):
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise APIError(503, "Account service is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY on the server.")
+    endpoint = "/auth/v1/signup" if action == "register" else "/auth/v1/token?grant_type=password"
+    payload = json.dumps({"email": email, "password": password}).encode()
+    request = urllib.request.Request(SUPABASE_URL + endpoint, data=payload, headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}", "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        try:
+            error_data = json.loads(body)
+            detail = error_data.get("msg") or error_data.get("message") or error_data.get("error_description") or error_data.get("error", "")
+        except (ValueError, TypeError):
+            detail = ""
+        detail = str(detail)
+        if action == "register" and (exc.code == 400 or "already registered" in detail.lower() or "already exists" in detail.lower()):
+            raise APIError(409, "An account with that email already exists, or Supabase rejected the password.")
+        if exc.code in (400, 401) and action == "login":
+            raise APIError(401, "Email or password is incorrect.")
+        raise APIError(502, f"Supabase account request failed: {detail or 'Please try again.'}")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise APIError(502, f"Could not reach Supabase: {exc.reason if isinstance(exc, urllib.error.URLError) else 'request timed out'}.")
+
+
+def local_user_for_supabase(auth_user, email):
+    sid = str(auth_user["id"])
+    with connect() as db:
+        row = db.execute("SELECT id,email FROM users WHERE supabase_user_id=?", (sid,)).fetchone()
+        if row:
+            return dict(row)
+        row = db.execute("SELECT id,email FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            db.execute("UPDATE users SET supabase_user_id=? WHERE id=?", (sid, row["id"]))
+            return dict(row)
+        salt = secrets.token_bytes(16)
+        digest = hashlib.scrypt(secrets.token_bytes(32), salt=salt, n=2**14, r=8, p=1)
+        cur = db.execute("INSERT INTO users(email,salt,password_hash,created_at,supabase_user_id) VALUES(?,?,?,?,?)", (email, salt, digest, int(time.time()), sid))
+        return {"id": cur.lastrowid, "email": email}
 
 
 class APIError(Exception):
@@ -160,20 +210,16 @@ class Handler(BaseHTTPRequestHandler):
                     raise APIError(400, "Enter a valid email address.")
                 if path.endswith("register") and len(password) < 10:
                     raise APIError(400, "Use a password with at least 10 characters.")
-                with connect() as db:
-                    user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-                    if path.endswith("register"):
-                        if user:
-                            raise APIError(409, "An account with that email already exists.")
-                        salt = secrets.token_bytes(16)
-                        password_hash = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
-                        cur = db.execute("INSERT INTO users(email,salt,password_hash,created_at) VALUES(?,?,?,?)", (email, salt, password_hash, int(time.time())))
-                        uid = cur.lastrowid
-                    else:
-                        if not user or not hmac.compare_digest(hashlib.scrypt(password.encode(), salt=user["salt"], n=2**14, r=8, p=1), user["password_hash"]):
-                            raise APIError(401, "Email or password is incorrect.")
-                        uid = user["id"]
-                return self.send_json(200, {"user": {"id": uid, "email": email}}, [("Set-Cookie", self.set_session(uid))])
+                action = "register" if path.endswith("register") else "login"
+                auth_data = supabase_auth(action, email, password)
+                auth_user = auth_data.get("user") or {}
+                if not auth_user.get("id"):
+                    raise APIError(502, "Supabase did not return an account. Please try again.")
+                if action == "register" and not auth_data.get("access_token"):
+                    return self.send_json(200, {"needs_confirmation": True, "message": "Account created. Check your email to confirm it, then sign in."})
+                local_user = local_user_for_supabase(auth_user, auth_user.get("email", email).lower())
+                uid = local_user["id"]
+                return self.send_json(200, {"user": {"id": uid, "email": local_user["email"]}}, [("Set-Cookie", self.set_session(uid))])
             user = self.require_user()
             if path == "/api/logout":
                 token = self.token()
