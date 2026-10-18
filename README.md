@@ -1,16 +1,26 @@
 # Ledgerly
 
-## Supabase account setup
+## Supabase setup
 
-Create a Supabase project and set these environment variables where the app server runs:
+Create a Supabase project and provide its project URL and publishable (or legacy anon) key to the app server. For local development, add them to the root `.env` file:
 
 ```sh
-export SUPABASE_URL="https://your-project-ref.supabase.co"
-export SUPABASE_ANON_KEY="your-project-anon-key"
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_ANON_KEY=your-project-publishable-or-anon-key
+ALPHAVANTAGE_API_KEY=your-market-data-api-key
 npm run dev
 ```
 
-The app uses Supabase Auth for account creation and password sign-in. If email confirmation is enabled in Supabase Auth, new users must confirm their email before signing in. The anon key is used only by the server for Auth requests; never put a service role key in browser code.
+The local Python server loads `.env` automatically and keeps existing shell environment variables as the override. See [`.env.example`](.env.example) for the supported settings. Local development keeps finance records in `budgeting.db`.
 
-The existing SQLite database keeps the app's finance records and a link to each Supabase Auth user. Account passwords are handled by Supabase and are not stored in SQLite. Existing local accounts are linked to the matching Supabase account by email when they first sign in.
+Before deploying, run [`supabase/schema.sql`](supabase/schema.sql) once in the Supabase SQL Editor. It creates the transaction, investment, and budget tables with row-level security policies tied to the signed-in Supabase user. Account passwords and finance records stay in Supabase; the Vercel function uses the user's access token and the publishable/anon key, and does not need a service-role key. If email confirmation is enabled in Supabase Auth, new users must confirm their email before signing in.
 
+## Vercel deployment
+
+This repository includes a Vercel Python Function at `api/[...path].py` for the API. Vercel serves the frontend files in `public/` from the site root. The linked Vercel project is recorded in `.vercel/project.json`; connect the repository to that project in Vercel and deploy it.
+
+Set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `ALPHAVANTAGE_API_KEY` in the Vercel project's Preview and Production environments, then redeploy. The Supabase values are already configured for the linked project. Keep the Alpha Vantage key server-side; do not add a Supabase service-role key. Values from local `.env` files are not uploaded automatically.
+
+Vercel builds use Python 3.12, pinned in `.python-version`. On this Mac, the bundled native Vercel CLI currently fails to start the Python runtime; run the JavaScript CLI with `VERCEL_CLI_USE_NATIVE_BINARY=0 vercel dev` to work around that local launcher issue. A local production build can be checked with `VERCEL_CLI_USE_NATIVE_BINARY=0 vercel build --yes --target production`.
+
+Local SQLite records are separate from Supabase and are not uploaded or migrated by deployment. The investment form records stocks, ETFs, and bonds with purchase price and date. Stock and ETF prices refresh automatically when a signed-in user opens or returns to the app, at most once per 24 hours per browser; server-side quotes are cached for 24 hours. Configure `ALPHAVANTAGE_API_KEY` to enable quotes. The provider's free quote is end-of-day (25 requests per day); real-time or 15-minute delayed US quotes require a paid entitlement and `ALPHAVANTAGE_ENTITLEMENT=realtime` or `delayed`. Bond prices are entered manually.
