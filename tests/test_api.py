@@ -143,6 +143,29 @@ class APITestCase(unittest.TestCase):
         self.assertEqual(overview["transactions"][0]["cadence"], "custom")
         self.assertEqual(overview["transactions"][0]["custom_frequency"], "Every 3 months")
 
+    def test_transaction_can_be_edited(self):
+        cookie = self.create_account()
+        original = {"title": "Paycheck", "amount": 3000, "kind": "income", "cadence": "once", "date": "2026-10-18"}
+        updated = {"title": "New paycheck", "amount": 3250, "kind": "income", "cadence": "custom", "custom_frequency": "Every 1 week", "date": "2026-10-20"}
+        with patch.object(server, "DATA_BACKEND", "sqlite"):
+            status, created, _ = self.request("POST", "/api/transactions", original, {"Cookie": cookie})
+            self.assertEqual(status, 201, created)
+            status, response, _ = self.request("PUT", f"/api/transactions/{created['id']}", updated, {"Cookie": cookie})
+            self.assertEqual(status, 200, response)
+            status, overview, _ = self.request("GET", "/api/overview", headers={"Cookie": cookie})
+        transaction = overview["transactions"][0]
+        self.assertEqual((transaction["title"], transaction["amount"], transaction["date"]), ("New paycheck", 3250, "2026-10-20"))
+        self.assertEqual((transaction["cadence"], transaction["custom_frequency"]), ("custom", "Every 1 week"))
+
+    def test_transaction_edit_rejects_missing_or_invalid_records(self):
+        cookie = self.create_account()
+        payload = {"title": "Rent", "amount": 1200, "kind": "expense", "cadence": "once", "date": "2026-10-01"}
+        with patch.object(server, "DATA_BACKEND", "sqlite"):
+            status, response, _ = self.request("PUT", "/api/transactions/999", payload, {"Cookie": cookie})
+            self.assertEqual(status, 404, response)
+            status, response, _ = self.request("PUT", "/api/transactions/999", {**payload, "amount": "NaN"}, {"Cookie": cookie})
+        self.assertEqual(status, 400, response)
+
     def test_custom_frequency_requires_a_description(self):
         cookie = self.create_account()
         payload = {"title": "Quarterly insurance", "amount": 240, "kind": "expense", "cadence": "custom", "date": "2026-10-18"}

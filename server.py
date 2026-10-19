@@ -640,6 +640,48 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json(500, {"error": f"Something went wrong: {exc}"})
 
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        try:
+            match = re.fullmatch(r"/api/transactions/(\d+)", path)
+            if not match:
+                raise APIError(404, "That API route was not found.")
+            user = self.require_user()
+            data = self.body()
+            transaction_id = int(match.group(1))
+            title = str(data.get("title", "")).strip()[:80]
+            kind, cadence = data.get("kind"), data.get("cadence", "once")
+            custom_frequency = str(data.get("custom_frequency", "")).strip()[:50] if cadence == "custom" else None
+            try:
+                amount = round(float(data.get("amount")), 2)
+            except (ValueError, TypeError, OverflowError):
+                raise APIError(400, "Enter a valid amount.")
+            date = str(data.get("date", ""))
+            if not title or not math.isfinite(amount) or amount <= 0 or amount > 1_000_000_000 or kind not in ("income", "expense", "saving") or cadence not in ("once", "weekly", "monthly", "yearly", "custom") or (cadence == "custom" and not custom_frequency):
+                raise APIError(400, "Check the name, amount, type, and frequency.")
+            try:
+                if calendar_date.fromisoformat(date).isoformat() != date:
+                    raise ValueError
+            except ValueError:
+                raise APIError(400, "Choose a valid date.")
+            category = {"income": "Income", "expense": "Expense", "saving": "Savings"}[kind]
+            values = {"title": title, "category": category, "amount": amount, "kind": kind, "cadence": cadence, "custom_frequency": custom_frequency, "date": date}
+            if DATA_BACKEND == "supabase":
+                tokens = self.remote_tokens()
+                rows = supabase_data("transactions", "PATCH", query=f"id=eq.{transaction_id}&select=id", payload=values, access_token=tokens["access"], prefer="return=representation")
+                if not rows:
+                    raise APIError(404, "That transaction was not found.")
+            else:
+                with connect() as db:
+                    cur = db.execute("UPDATE transactions SET title=?,category=?,amount=?,kind=?,cadence=?,custom_frequency=?,date=? WHERE id=? AND user_id=?", (title, category, amount, kind, cadence, custom_frequency, date, transaction_id, user["id"]))
+                if cur.rowcount == 0:
+                    raise APIError(404, "That transaction was not found.")
+            self.send_json(200, {"ok": True})
+        except APIError as exc:
+            self.send_json(exc.status, {"error": exc.message})
+        except Exception as exc:
+            self.send_json(500, {"error": f"Something went wrong: {exc}"})
+
 
 if __name__ == "__main__":
     init_db()
