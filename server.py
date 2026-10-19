@@ -107,7 +107,7 @@ def market_quote(symbol):
     query = urlencode(params)
     request = urllib.request.Request(
         f"https://www.alphavantage.co/query?{query}",
-        headers={"User-Agent": "Ledgerly/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "Budgeting/1.0", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=12) as response:
@@ -142,7 +142,7 @@ def market_daily_series(symbol):
     params = {"function": "TIME_SERIES_DAILY", "symbol": symbol, "outputsize": "compact", "apikey": ALPHAVANTAGE_API_KEY}
     request = urllib.request.Request(
         f"https://www.alphavantage.co/query?{urlencode(params)}",
-        headers={"User-Agent": "Ledgerly/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "Budgeting/1.0", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=12) as response:
@@ -303,7 +303,7 @@ class APIError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Ledgerly/1.0"
+    server_version = "Budgeting/1.0"
 
     def log_message(self, fmt, *args):
         # Request errors are returned to the caller; routine requests stay quiet.
@@ -685,5 +685,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
-    print(f"Ledgerly is running at http://localhost:{PORT}", flush=True)
+    print(f"Budgeting is running at http://localhost:{PORT}", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

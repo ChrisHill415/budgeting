@@ -1,4 +1,4 @@
-# Ledgerly
+# Budgeting
 
 ## Supabase setup
 
