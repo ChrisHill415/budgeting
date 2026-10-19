@@ -3,7 +3,7 @@ Manage finances.
 Include various sources of income or purchases that are reccuring or one-time
 Include savings and show live updates if some money is tied up in stocks.
 ## Commands
-- Run: npm run dev
+- Run: vercel dev
 - Test: npm test
 ## Rules
 - Laptop first.

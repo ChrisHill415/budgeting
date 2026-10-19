@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "python3 server.py",
-    "test": "python3 -m unittest discover -s tests -v"
+    "test": "python3 -m unittest discover -s tests -v && node --test tests/test_*.js"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
   }
 }

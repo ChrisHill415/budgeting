@@ -1,4 +1,9 @@
 __pycache__/
 *.pyc
 budgeting.db
+*.db-shm
+*.db-wal
 .env
+.env.*
+!.env.example
+.vercel/
