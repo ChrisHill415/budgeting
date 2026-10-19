@@ -51,6 +51,17 @@ class APITestCase(unittest.TestCase):
         self.assertEqual(raised.exception.status, 503)
         self.assertIn("Apply the latest supabase/schema.sql", raised.exception.message)
 
+    def test_public_config_exposes_only_configured_adsense_ids(self):
+        with patch.object(server, "ADSENSE_CLIENT_ID", "ca-pub-1234567890123456"), patch.object(
+            server, "ADSENSE_SLOT_ID", "1234567890"
+        ):
+            status, payload, _ = self.request("GET", "/api/public-config")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {
+            "adsense_client_id": "ca-pub-1234567890123456",
+            "adsense_slot_id": "1234567890",
+        })
+
     def test_quote_cache_is_fresh_for_a_day(self):
         now = datetime.now(timezone.utc)
         fresh = (now - timedelta(hours=23)).isoformat()
@@ -75,6 +86,14 @@ class APITestCase(unittest.TestCase):
         self.assertIn("symbol=VTI", request.full_url)
         self.assertNotIn("entitlement=", request.full_url)
 
+    def test_market_daily_series_returns_opening_prices(self):
+        response = BytesIO(json.dumps({"Time Series (Daily)": {"2026-10-16": {"1. open": "231.7500", "4. close": "235.00"}}}).encode())
+        with patch.object(server, "ALPHAVANTAGE_API_KEY", "test-key"), patch.object(server.urllib.request, "urlopen", return_value=response) as open_url:
+            prices = server.market_daily_series("VTI")
+        self.assertEqual(prices, {"2026-10-16": 231.75})
+        self.assertIn("function=TIME_SERIES_DAILY", open_url.call_args.args[0].full_url)
+        self.assertIn("outputsize=compact", open_url.call_args.args[0].full_url)
+
     def test_account_creation_and_authenticated_overview(self):
         cookie = self.create_account()
         status, payload, _ = self.request("GET", "/api/overview", headers={"Cookie": cookie})
@@ -97,11 +116,39 @@ class APITestCase(unittest.TestCase):
 
     def test_transaction_rejects_non_finite_amount_and_invalid_calendar_date(self):
         cookie = self.create_account()
-        base = {"title": "Paycheck", "category": "Salary", "kind": "income", "cadence": "once", "date": "2026-10-16"}
+        base = {"title": "Paycheck", "kind": "income", "cadence": "once", "date": "2026-10-16"}
         status, payload, _ = self.request("POST", "/api/transactions", {**base, "amount": "NaN"}, {"Cookie": cookie})
         self.assertEqual(status, 400, payload)
         status, payload, _ = self.request("POST", "/api/transactions", {**base, "amount": 100, "date": "2026-02-30"}, {"Cookie": cookie})
         self.assertEqual(status, 400, payload)
+
+    def test_transaction_can_be_saved_without_category(self):
+        cookie = self.create_account()
+        payload = {"title": "Paycheck", "amount": 3000, "kind": "income", "cadence": "once", "date": "2026-10-18"}
+        with patch.object(server, "DATA_BACKEND", "sqlite"):
+            status, response, _ = self.request("POST", "/api/transactions", payload, {"Cookie": cookie})
+            self.assertEqual(status, 201, response)
+            with server.connect() as db:
+                saved = db.execute("SELECT category FROM transactions WHERE id=?", (response["id"],)).fetchone()
+        self.assertEqual(saved["category"], "Income")
+
+    def test_transaction_saves_custom_frequency(self):
+        cookie = self.create_account()
+        payload = {"title": "Quarterly insurance", "amount": 240, "kind": "expense", "cadence": "custom", "custom_frequency": "Every 3 months", "date": "2026-10-18"}
+        with patch.object(server, "DATA_BACKEND", "sqlite"):
+            status, response, _ = self.request("POST", "/api/transactions", payload, {"Cookie": cookie})
+            self.assertEqual(status, 201, response)
+            status, overview, _ = self.request("GET", "/api/overview", headers={"Cookie": cookie})
+        self.assertEqual(status, 200, overview)
+        self.assertEqual(overview["transactions"][0]["cadence"], "custom")
+        self.assertEqual(overview["transactions"][0]["custom_frequency"], "Every 3 months")
+
+    def test_custom_frequency_requires_a_description(self):
+        cookie = self.create_account()
+        payload = {"title": "Quarterly insurance", "amount": 240, "kind": "expense", "cadence": "custom", "date": "2026-10-18"}
+        status, response, _ = self.request("POST", "/api/transactions", payload, {"Cookie": cookie})
+        self.assertEqual(status, 400)
+        self.assertIn("frequency", response["error"])
 
     def test_investment_stores_asset_type_purchase_basis_and_refreshes_quote(self):
         cookie = self.create_account()
@@ -119,8 +166,8 @@ class APITestCase(unittest.TestCase):
             self.assertEqual(overview["investments"][0]["current_price"], None)
 
             with patch.object(server, "market_quote", return_value={"symbol": "VTI", "price": 231.75, "as_of": "2026-10-17"}) as provider:
-                status, quote, _ = self.request("POST", "/api/investments/quote", {"symbol": "VTI"}, {"Cookie": cookie})
-                status, cached_quote, _ = self.request("POST", "/api/investments/quote", {"symbol": "VTI"}, {"Cookie": cookie})
+                status, quote, _ = self.request("POST", "/api/investment-quote", {"symbol": "VTI"}, {"Cookie": cookie})
+                status, cached_quote, _ = self.request("POST", "/api/investment-quote", {"symbol": "VTI"}, {"Cookie": cookie})
             self.assertEqual(status, 200, quote)
             self.assertEqual(quote["price"], 231.75)
             self.assertEqual(quote["as_of"], "2026-10-17")
@@ -129,6 +176,21 @@ class APITestCase(unittest.TestCase):
             status, overview, _ = self.request("GET", "/api/overview", headers={"Cookie": cookie})
             self.assertEqual(status, 200, overview)
             self.assertEqual(overview["investments"][0]["current_price"], 231.75)
+
+    def test_investment_event_opening_value_uses_purchase_date(self):
+        cookie = self.create_account()
+        with patch.object(server, "DATA_BACKEND", "sqlite"):
+            status, payload, _ = self.request("POST", "/api/investments", {"asset_type": "stock", "symbol": "AAPL", "name": "Apple", "shares": 3, "purchase_price": 200, "purchase_date": "2026-10-16"}, {"Cookie": cookie})
+            self.assertEqual(status, 201, payload)
+            with patch.object(server, "market_daily_series", return_value={"2026-10-16": 205.5}) as provider:
+                status, opened, _ = self.request("POST", "/api/investment-open", {"symbol": "AAPL"}, {"Cookie": cookie})
+            self.assertEqual(status, 200, opened)
+            self.assertEqual(opened["updated"], 1)
+            provider.assert_called_once_with("AAPL")
+            status, overview, _ = self.request("GET", "/api/overview", headers={"Cookie": cookie})
+        self.assertEqual(status, 200, overview)
+        self.assertEqual(overview["investments"][0]["event_open_price"], 205.5)
+        self.assertIsNotNone(overview["investments"][0]["event_open_checked_at"])
 
     def test_quote_refresh_rejects_bond_holdings(self):
         cookie = self.create_account()
@@ -139,7 +201,7 @@ class APITestCase(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         with patch.object(server, "market_quote") as provider:
-            status, payload, _ = self.request("POST", "/api/investments/quote", {"symbol": "91282CJL6"}, {"Cookie": cookie})
+            status, payload, _ = self.request("POST", "/api/investment-quote", {"symbol": "91282CJL6"}, {"Cookie": cookie})
         self.assertEqual(status, 404)
         self.assertIn("No stock or ETF holding", payload["error"])
         provider.assert_not_called()
@@ -152,7 +214,7 @@ class APITestCase(unittest.TestCase):
             {"Cookie": cookie},
         )
         with patch.object(server, "ALPHAVANTAGE_API_KEY", ""):
-            status, payload, _ = self.request("POST", "/api/investments/quote", {"symbol": "AAPL"}, {"Cookie": cookie})
+            status, payload, _ = self.request("POST", "/api/investment-quote", {"symbol": "AAPL"}, {"Cookie": cookie})
         self.assertEqual(status, 503)
         self.assertIn("Set ALPHAVANTAGE_API_KEY", payload["error"])
 
@@ -170,6 +232,7 @@ class APITestCase(unittest.TestCase):
             if path.startswith("/rest/v1/settings") and method == "GET":
                 return [{"monthly_budget": 2500}]
             if path == "/rest/v1/transactions" and method == "POST":
+                self.assertEqual(payload["category"], "Income")
                 return [{"id": 33}]
             if path == "/rest/v1/investments" and method == "POST":
                 return [{"id": 44}]
@@ -209,7 +272,7 @@ class APITestCase(unittest.TestCase):
             self.assertEqual(status, 200, payload)
             self.assertEqual(payload["monthly_budget"], 2500)
 
-            status, payload, _ = self.request("POST", "/api/delete/transaction/33", {}, {"Cookie": cookie})
+            status, payload, _ = self.request("POST", "/api/delete", {"kind": "transaction", "id": 33}, {"Cookie": cookie})
             self.assertEqual(status, 200, payload)
 
             status, payload, cleared_cookie = self.request("POST", "/api/logout", {}, {"Cookie": cookie})

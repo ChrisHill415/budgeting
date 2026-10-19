@@ -6,10 +6,15 @@ create table if not exists public.transactions (
   category text not null,
   amount numeric(14, 2) not null check (amount > 0),
   kind text not null check (kind in ('income', 'expense', 'saving', 'investment')),
-  cadence text not null default 'once' check (cadence in ('once', 'weekly', 'monthly', 'yearly')),
+  cadence text not null default 'once',
+  custom_frequency text,
   date date not null,
   created_at timestamptz not null default now()
 );
+
+alter table public.transactions add column if not exists custom_frequency text;
+alter table public.transactions drop constraint if exists transactions_cadence_check;
+alter table public.transactions add constraint transactions_cadence_check check (cadence in ('once', 'weekly', 'monthly', 'yearly', 'custom'));
 
 create index if not exists transactions_user_date on public.transactions (user_id, date desc, id desc);
 
@@ -33,6 +38,8 @@ alter table public.investments add column if not exists purchase_date date;
 alter table public.investments add column if not exists current_price numeric(14, 4);
 alter table public.investments add column if not exists quote_updated_at timestamptz;
 alter table public.investments add column if not exists quote_as_of date;
+alter table public.investments add column if not exists event_open_price numeric(14, 4);
+alter table public.investments add column if not exists event_open_checked_at timestamptz;
 alter table public.investments alter column price type numeric(14, 4);
 alter table public.investments drop constraint if exists investments_asset_type_check;
 alter table public.investments add constraint investments_asset_type_check check (asset_type in ('stock', 'etf', 'bond'));
@@ -66,8 +73,10 @@ create policy "Users manage their settings" on public.settings
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+revoke all privileges on table public.transactions, public.investments, public.settings from anon, authenticated;
 grant select, insert, delete on public.transactions to authenticated;
-grant select, insert, delete on public.investments to authenticated;
+grant select, insert, update, delete on public.investments to authenticated;
 grant select, insert, update on public.settings to authenticated;
+revoke all privileges on sequence public.transactions_id_seq, public.investments_id_seq from anon, authenticated;
 grant usage, select on sequence public.transactions_id_seq to authenticated;
 grant usage, select on sequence public.investments_id_seq to authenticated;

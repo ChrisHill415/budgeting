@@ -49,6 +49,8 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 DATA_BACKEND = os.environ.get("LEDGERLY_DATA_BACKEND", "sqlite")
 ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY", "")
 ALPHAVANTAGE_ENTITLEMENT = os.environ.get("ALPHAVANTAGE_ENTITLEMENT", "")
+ADSENSE_CLIENT_ID = os.environ.get("ADSENSE_CLIENT_ID", "")
+ADSENSE_SLOT_ID = os.environ.get("ADSENSE_SLOT_ID", "")
 
 
 def supabase_request(path, method="GET", payload=None, access_token=None, prefer=None):
@@ -134,6 +136,44 @@ def market_quote(symbol):
     raise APIError(502, f"The quote provider returned no price for {symbol}.")
 
 
+def market_daily_series(symbol):
+    if not ALPHAVANTAGE_API_KEY:
+        raise APIError(503, "Historical market lookup is not configured. Set ALPHAVANTAGE_API_KEY on the server.")
+    params = {"function": "TIME_SERIES_DAILY", "symbol": symbol, "outputsize": "compact", "apikey": ALPHAVANTAGE_API_KEY}
+    request = urllib.request.Request(
+        f"https://www.alphavantage.co/query?{urlencode(params)}",
+        headers={"User-Agent": "Ledgerly/1.0", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            data = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise APIError(502, f"Historical price provider returned HTTP {exc.code}.")
+    except urllib.error.URLError as exc:
+        raise APIError(502, f"Could not reach the historical price provider: {exc.reason}.")
+    except (TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+        raise APIError(502, "The historical price provider returned an unreadable or timed-out response.")
+    if not isinstance(data, dict):
+        raise APIError(502, "The historical price provider returned an unexpected response.")
+    series = data.get("Time Series (Daily)")
+    if series is None:
+        if data.get("Note") or data.get("Information"):
+            raise APIError(429, "The quote provider is limiting requests. Wait before refreshing prices again.")
+        if data.get("Error Message"):
+            raise APIError(404, f"No historical prices were found for {symbol}.")
+        raise APIError(502, f"The quote provider returned no daily prices for {symbol}.")
+    prices = {}
+    for event_date, point in series.items():
+        try:
+            price = round(float(point["1. open"]), 4)
+        except (KeyError, ValueError, TypeError, OverflowError):
+            raise APIError(502, "The historical price provider returned an invalid opening price.")
+        if not math.isfinite(price) or price < 0:
+            raise APIError(502, "The historical price provider returned an invalid opening price.")
+        prices[event_date] = price
+    return prices
+
+
 def quote_cache_fresh(updated_at):
     try:
         timestamp = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
@@ -178,13 +218,14 @@ def init_db():
             id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             title TEXT NOT NULL, category TEXT NOT NULL, amount REAL NOT NULL,
             kind TEXT NOT NULL CHECK(kind IN ('income','expense','saving','investment')),
-            cadence TEXT NOT NULL DEFAULT 'once', date TEXT NOT NULL, created_at INTEGER NOT NULL
+            cadence TEXT NOT NULL DEFAULT 'once', custom_frequency TEXT, date TEXT NOT NULL, created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS investments (
             id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             symbol TEXT NOT NULL, name TEXT NOT NULL, shares REAL NOT NULL, price REAL NOT NULL,
             updated_at INTEGER NOT NULL, asset_type TEXT NOT NULL DEFAULT 'stock', purchase_date TEXT,
-            current_price REAL, quote_updated_at TEXT, quote_as_of TEXT
+            current_price REAL, quote_updated_at TEXT, quote_as_of TEXT,
+            event_open_price REAL, event_open_checked_at TEXT
         );
         CREATE TABLE IF NOT EXISTS settings (
             user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -197,6 +238,9 @@ def init_db():
         if "supabase_user_id" not in columns:
             db.execute("ALTER TABLE users ADD COLUMN supabase_user_id TEXT")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_supabase_id ON users(supabase_user_id)")
+        transaction_columns = {row[1] for row in db.execute("PRAGMA table_info(transactions)")}
+        if "custom_frequency" not in transaction_columns:
+            db.execute("ALTER TABLE transactions ADD COLUMN custom_frequency TEXT")
         investment_columns = {row[1] for row in db.execute("PRAGMA table_info(investments)")}
         for name, declaration in (
             ("asset_type", "TEXT NOT NULL DEFAULT 'stock'"),
@@ -204,6 +248,8 @@ def init_db():
             ("current_price", "REAL"),
             ("quote_updated_at", "TEXT"),
             ("quote_as_of", "TEXT"),
+            ("event_open_price", "REAL"),
+            ("event_open_checked_at", "TEXT"),
         ):
             if name not in investment_columns:
                 db.execute(f"ALTER TABLE investments ADD COLUMN {name} {declaration}")
@@ -364,6 +410,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         try:
+            if path == "/api/public-config":
+                return self.send_json(200, {
+                    "adsense_client_id": ADSENSE_CLIENT_ID,
+                    "adsense_slot_id": ADSENSE_SLOT_ID,
+                })
             if path == "/api/me":
                 user = self.user()
                 return self.send_json(200, {"user": user})
@@ -372,14 +423,14 @@ class Handler(BaseHTTPRequestHandler):
                 if DATA_BACKEND == "supabase":
                     tokens = self.remote_tokens()
                     access = tokens["access"]
-                    tx = supabase_data("transactions", query="select=id,title,category,amount,kind,cadence,date&order=date.desc,id.desc", access_token=access)
-                    inv = supabase_data("investments", query="select=id,symbol,name,shares,price,asset_type,purchase_date,current_price,quote_updated_at,quote_as_of,updated_at&order=id.desc", access_token=access)
+                    tx = supabase_data("transactions", query="select=id,title,category,amount,kind,cadence,custom_frequency,date&order=date.desc,id.desc", access_token=access)
+                    inv = supabase_data("investments", query="select=id,symbol,name,shares,price,asset_type,purchase_date,current_price,quote_updated_at,quote_as_of,event_open_price,event_open_checked_at,updated_at&order=id.desc", access_token=access)
                     settings = supabase_data("settings", query="select=monthly_budget&limit=1", access_token=access)
                     budget = settings[0]["monthly_budget"] if settings else 4000
                 else:
                     with connect() as db:
-                        tx = [dict(r) for r in db.execute("SELECT id,title,category,amount,kind,cadence,date FROM transactions WHERE user_id=? ORDER BY date DESC,id DESC", (user["id"],))]
-                        inv = [dict(r) for r in db.execute("SELECT id,symbol,name,shares,price,asset_type,purchase_date,current_price,quote_updated_at,quote_as_of,updated_at FROM investments WHERE user_id=? ORDER BY id DESC", (user["id"],))]
+                        tx = [dict(r) for r in db.execute("SELECT id,title,category,amount,kind,cadence,custom_frequency,date FROM transactions WHERE user_id=? ORDER BY date DESC,id DESC", (user["id"],))]
+                        inv = [dict(r) for r in db.execute("SELECT id,symbol,name,shares,price,asset_type,purchase_date,current_price,quote_updated_at,quote_as_of,event_open_price,event_open_checked_at,updated_at FROM investments WHERE user_id=? ORDER BY id DESC", (user["id"],))]
                         settings = db.execute("SELECT monthly_budget FROM settings WHERE user_id=?", (user["id"],)).fetchone()
                     budget = settings["monthly_budget"] if settings else 4000
                 return self.send_json(200, {"transactions": tx, "investments": inv, "monthly_budget": budget})
@@ -396,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "same-origin")
-            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' https://pagead2.googlesyndication.com https://*.googlesyndication.com https://www.googletagservices.com https://www.google.com https://www.googleadservices.com; img-src 'self' data: https://pagead2.googlesyndication.com https://*.google.com https://*.googleusercontent.com https://*.gstatic.com https://*.doubleclick.net https://www.googleadservices.com; connect-src 'self' https://pagead2.googlesyndication.com https://*.googlesyndication.com https://googleads.g.doubleclick.net https://www.google.com https://www.googleadservices.com https://ad.doubleclick.net; frame-src https://googleads.g.doubleclick.net https://*.doubleclick.net https://*.googlesyndication.com https://tpc.googlesyndication.com https://www.google.com; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(raw)
         except APIError as exc:
@@ -431,7 +482,38 @@ class Handler(BaseHTTPRequestHandler):
                 uid = local_user["id"]
                 return self.send_json(200, {"user": {"id": uid, "email": local_user["email"]}}, [("Set-Cookie", self.set_session(uid))])
             user = self.require_user()
-            if path == "/api/investments/quote":
+            if path in ("/api/investment-open", "/api/investments/open"):
+                symbol = str(data.get("symbol", "")).strip().upper()
+                if not re.fullmatch(r"[A-Z0-9.^=-]{1,15}", symbol):
+                    raise APIError(400, "Enter a valid stock or ETF ticker.")
+                if DATA_BACKEND == "supabase":
+                    tokens = self.remote_tokens()
+                    holdings = supabase_data("investments", query=f"select=id,purchase_date,event_open_price,event_open_checked_at&symbol=eq.{quote(symbol, safe='')}&asset_type=in.(stock,etf)", access_token=tokens["access"])
+                else:
+                    with connect() as db:
+                        holdings = [dict(row) for row in db.execute("SELECT id,purchase_date,event_open_price,event_open_checked_at FROM investments WHERE user_id=? AND symbol=? AND asset_type IN ('stock','etf')", (user["id"], symbol))]
+                pending = [row for row in holdings if not row.get("event_open_checked_at")]
+                if not pending:
+                    return self.send_json(200, {"symbol": symbol, "checked": 0, "updated": 0})
+                event_dates = sorted({row.get("purchase_date") for row in pending if row.get("purchase_date")})
+                prices = {}
+                if event_dates:
+                    daily = market_daily_series(symbol)
+                    for event_date in event_dates:
+                        prices[event_date] = daily.get(event_date)
+                checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                updated = 0
+                for row in pending:
+                    event_date = row.get("purchase_date")
+                    opening_price = prices.get(event_date) if event_date else None
+                    if DATA_BACKEND == "supabase":
+                        supabase_data("investments", "PATCH", query=f"id=eq.{row['id']}", payload={"event_open_price": opening_price, "event_open_checked_at": checked_at}, access_token=tokens["access"], prefer="return=minimal")
+                    else:
+                        with connect() as db:
+                            db.execute("UPDATE investments SET event_open_price=?,event_open_checked_at=? WHERE id=? AND user_id=?", (opening_price, checked_at, row["id"], user["id"]))
+                    updated += 1
+                return self.send_json(200, {"symbol": symbol, "checked": len(pending), "updated": updated})
+            if path in ("/api/investment-quote", "/api/investments/quote"):
                 symbol = str(data.get("symbol", "")).strip().upper()
                 if not re.fullmatch(r"[A-Z0-9.^=-]{1,15}", symbol):
                     raise APIError(400, "Enter a valid stock or ETF ticker.")
@@ -467,26 +549,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"ok": True}, [("Set-Cookie", f"{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
             if path == "/api/transactions":
                 title = str(data.get("title", "")).strip()[:80]
-                category = str(data.get("category", "Other")).strip()[:40]
                 kind, cadence = data.get("kind"), data.get("cadence", "once")
+                custom_frequency = str(data.get("custom_frequency", "")).strip()[:50] if cadence == "custom" else None
                 try:
                     amount = round(float(data.get("amount")), 2)
                 except (ValueError, TypeError, OverflowError):
                     raise APIError(400, "Enter a valid amount.")
                 date = str(data.get("date", ""))
-                if not title or not math.isfinite(amount) or amount <= 0 or amount > 1_000_000_000 or kind not in ("income", "expense", "saving", "investment") or cadence not in ("once", "weekly", "monthly", "yearly"):
+                if not title or not math.isfinite(amount) or amount <= 0 or amount > 1_000_000_000 or kind not in ("income", "expense", "saving", "investment") or cadence not in ("once", "weekly", "monthly", "yearly", "custom") or (cadence == "custom" and not custom_frequency):
                     raise APIError(400, "Check the name, amount, type, and frequency.")
                 try:
                     if calendar_date.fromisoformat(date).isoformat() != date:
                         raise ValueError
                 except ValueError:
                     raise APIError(400, "Choose a valid date.")
+                category = {"income": "Income", "expense": "Expense", "saving": "Savings", "investment": "Investment"}[kind]
                 if DATA_BACKEND == "supabase":
                     tokens = self.remote_tokens()
-                    rows = supabase_data("transactions", "POST", payload={"title": title, "category": category or "Other", "amount": amount, "kind": kind, "cadence": cadence, "date": date}, access_token=tokens["access"], prefer="return=representation")
+                    rows = supabase_data("transactions", "POST", payload={"title": title, "category": category or "Other", "amount": amount, "kind": kind, "cadence": cadence, "custom_frequency": custom_frequency, "date": date}, access_token=tokens["access"], prefer="return=representation")
                     return self.send_json(201, {"id": rows[0]["id"]})
                 with connect() as db:
-                    cur = db.execute("INSERT INTO transactions(user_id,title,category,amount,kind,cadence,date,created_at) VALUES(?,?,?,?,?,?,?,?)", (user["id"], title, category or "Other", amount, kind, cadence, date, int(time.time())))
+                    cur = db.execute("INSERT INTO transactions(user_id,title,category,amount,kind,cadence,custom_frequency,date,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (user["id"], title, category or "Other", amount, kind, cadence, custom_frequency, date, int(time.time())))
                 return self.send_json(201, {"id": cur.lastrowid})
             if path == "/api/investments":
                 symbol = str(data.get("symbol", "")).strip().upper()[:10]
@@ -530,8 +613,13 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as db:
                     db.execute("INSERT INTO settings(user_id,monthly_budget) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET monthly_budget=excluded.monthly_budget", (user["id"], amount))
                 return self.send_json(200, {"monthly_budget": amount})
-            if path.startswith("/api/delete/"):
+            if path == "/api/delete":
+                kind, item_id = str(data.get("kind", "")), str(data.get("id", ""))
+            elif path.startswith("/api/delete/"):
                 kind, item_id = path.removeprefix("/api/delete/").split("/", 1)
+            else:
+                kind, item_id = None, None
+            if kind is not None:
                 table = "transactions" if kind == "transaction" else "investments" if kind == "investment" else None
                 if not table or not item_id.isdigit():
                     raise APIError(404, "That item was not found.")
