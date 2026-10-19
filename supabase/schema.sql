@@ -74,7 +74,7 @@ create policy "Users manage their settings" on public.settings
   with check (auth.uid() = user_id);
 
 revoke all privileges on table public.transactions, public.investments, public.settings from anon, authenticated;
-grant select, insert, delete on public.transactions to authenticated;
+grant select, insert, update, delete on public.transactions to authenticated;
 grant select, insert, update, delete on public.investments to authenticated;
 grant select, insert, update on public.settings to authenticated;
 revoke all privileges on sequence public.transactions_id_seq, public.investments_id_seq from anon, authenticated;

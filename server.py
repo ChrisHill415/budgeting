@@ -80,6 +80,17 @@ def supabase_request(path, method="GET", payload=None, access_token=None, prefer
             raise APIError(503, "Supabase is missing the finance tables. Apply the latest supabase/schema.sql in the Supabase SQL Editor, then retry.")
         if error_code == "PGRST204":
             raise APIError(503, "Supabase is missing finance table columns. Apply the latest supabase/schema.sql in the Supabase SQL Editor, then retry.")
+        if exc.code == 403:
+            detail = str(error_data.get("message") or error_data.get("msg") or "").strip()
+            detail = re.sub(r"\s+", " ", detail)[:240]
+            code = str(error_code or "")
+            if code == "42501" or "row-level security" in detail.lower() or "permission denied" in detail.lower():
+                guidance = "Check that the latest supabase/schema.sql was applied and that the signed-in user's access token is being used."
+            else:
+                guidance = "Check that SUPABASE_URL and SUPABASE_ANON_KEY belong to the same Supabase project and that the key is valid."
+            reason = f" Supabase says: {detail}" if detail else ""
+            code_label = f" (code {code})" if code else ""
+            raise APIError(502, f"Supabase denied the data request{code_label}.{reason} {guidance}")
         if exc.code == 404:
             raise APIError(502, "Supabase returned HTTP 404. Check SUPABASE_URL and confirm the finance tables are available in the public schema.")
         raise APIError(502, f"Supabase data request failed (HTTP {exc.code}).")

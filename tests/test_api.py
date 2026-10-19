@@ -51,6 +51,23 @@ class APITestCase(unittest.TestCase):
         self.assertEqual(raised.exception.status, 503)
         self.assertIn("Apply the latest supabase/schema.sql", raised.exception.message)
 
+    def test_supabase_403_explains_row_level_security_denial(self):
+        error = urllib.error.HTTPError(
+            "https://example.supabase.co/rest/v1/transactions", 403, "Forbidden", {},
+            BytesIO(json.dumps({
+                "code": "42501",
+                "message": "new row violates row-level security policy for table transactions",
+            }).encode()),
+        )
+        with patch.object(server, "SUPABASE_URL", "https://example.supabase.co"), patch.object(
+            server, "SUPABASE_ANON_KEY", "test-key"
+        ), patch.object(server.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(server.APIError) as raised:
+                server.supabase_request("/rest/v1/transactions")
+        self.assertEqual(raised.exception.status, 502)
+        self.assertIn("row-level security policy", raised.exception.message)
+        self.assertIn("latest supabase/schema.sql", raised.exception.message)
+
     def test_public_config_exposes_only_configured_adsense_ids(self):
         with patch.object(server, "ADSENSE_CLIENT_ID", "ca-pub-1234567890123456"), patch.object(
             server, "ADSENSE_SLOT_ID", "1234567890"
@@ -257,6 +274,10 @@ class APITestCase(unittest.TestCase):
             if path == "/rest/v1/transactions" and method == "POST":
                 self.assertEqual(payload["category"], "Income")
                 return [{"id": 33}]
+            if path == "/rest/v1/transactions?id=eq.33&select=id" and method == "PATCH":
+                self.assertEqual(payload["title"], "Updated paycheck")
+                self.assertEqual(payload["category"], "Income")
+                return [{"id": 33}]
             if path == "/rest/v1/investments" and method == "POST":
                 return [{"id": 44}]
             if path == "/rest/v1/settings?on_conflict=user_id" and method == "POST":
@@ -285,6 +306,10 @@ class APITestCase(unittest.TestCase):
             status, payload, _ = self.request("POST", "/api/transactions", transaction, {"Cookie": cookie})
             self.assertEqual(status, 201, payload)
             self.assertEqual(payload["id"], 33)
+
+            updated_transaction = {**transaction, "title": "Updated paycheck", "amount": 3200}
+            status, payload, _ = self.request("PUT", "/api/transactions/33", updated_transaction, {"Cookie": cookie})
+            self.assertEqual(status, 200, payload)
 
             investment = {"name": "Sample Fund", "symbol": "TEST", "shares": 2, "price": 75}
             status, payload, _ = self.request("POST", "/api/investments", investment, {"Cookie": cookie})
