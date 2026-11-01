@@ -38,6 +38,23 @@ class APITestCase(unittest.TestCase):
         raw = response.read()
         return response.status, json.loads(raw) if raw else {}, response.getheader("Set-Cookie")
 
+    def test_public_home_links_to_existing_login_without_authentication(self):
+        with patch.object(server, "supabase_request", side_effect=AssertionError("Home must not require Supabase")):
+            self.conn.request("GET", "/")
+            response = self.conn.getresponse()
+            home = response.read().decode()
+        self.assertEqual(response.status, 200)
+        self.assertIn('id="about"', home)
+        self.assertIn('href="/app.html"', home)
+        self.assertIn('ca-pub-6779870512574535', home)
+        self.assertNotIn('src="/app.js"', home)
+        self.conn.request("GET", "/app.html")
+        response = self.conn.getresponse()
+        app = response.read().decode()
+        self.assertEqual(response.status, 200)
+        self.assertIn('id="auth-form"', app)
+        self.assertIn('src="/app.js"', app)
+
     def test_missing_supabase_table_returns_schema_setup_instructions(self):
         error = urllib.error.HTTPError(
             "https://example.supabase.co/rest/v1/transactions", 404, "Not Found", {},
