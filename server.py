@@ -440,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             target = (ROOT / "public" / relative).resolve()
             if not target.is_relative_to((ROOT / "public").resolve()) or not target.is_file():
                 return self.send_json(404, {"error": "Page not found."})
-            mime = "text/html; charset=utf-8" if target.suffix == ".html" else "text/css; charset=utf-8" if target.suffix == ".css" else "text/javascript; charset=utf-8" if target.suffix == ".js" else "application/octet-stream"
+            mime = "text/html; charset=utf-8" if target.suffix == ".html" else "text/css; charset=utf-8" if target.suffix == ".css" else "text/javascript; charset=utf-8" if target.suffix == ".js" else "text/plain; charset=utf-8" if target.suffix == ".txt" else "application/octet-stream"
             raw = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", mime)
