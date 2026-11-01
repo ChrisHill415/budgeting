@@ -5,7 +5,31 @@ const localDateISO=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0
 const dateFmt=s=>new Date(`${s}T12:00:00`).toLocaleDateString('en-US',{month:'short',day:'numeric'});
 const escapeHTML=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,options={}){let res;try{res=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}})}catch(e){throw Error(`Could not reach the app server (${e.message||'network request failed'}). Check your connection and try again.`)}let data={};try{data=await res.json()}catch(e){throw Error('The server returned an unreadable response.')}if(!res.ok){const error=Error(data.error||`Request failed (${res.status}).`);error.status=res.status;throw error}return data}
-async function loadAds(){const slot=$('#adsense-slot');try{const config=await api('/api/public-config');if(!/^ca-pub-\d+$/.test(config.adsense_client_id||'')||!/^\d+$/.test(config.adsense_slot_id||''))return;const script=document.createElement('script');script.async=true;script.crossOrigin='anonymous';script.src=`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(config.adsense_client_id)}`;script.onload=()=>{const unit=document.createElement('ins');unit.className='adsbygoogle';unit.style.display='block';unit.dataset.adClient=config.adsense_client_id;unit.dataset.adSlot=config.adsense_slot_id;unit.dataset.adFormat='auto';unit.dataset.fullWidthResponsive='true';slot.append(unit);slot.classList.remove('hidden');try{(window.adsbygoogle=window.adsbygoogle||[]).push({})}catch(error){slot.textContent=`AdSense error: ${error.message}`}};script.onerror=()=>{slot.textContent='AdSense could not load. Check the publisher setup or connection.';slot.classList.remove('hidden')};document.head.append(script)}catch(error){slot.textContent=`Ad setup error: ${error.message}`;slot.classList.remove('hidden')}}
+async function loadAds(){
+  const slot=$('#adsense-slot');
+  if(slot.querySelector('ins'))return;
+  try{
+    const config=await api('/api/public-config');
+    if(!config.adsense_slot_id)return;
+    const script=document.querySelector('script[src*="/pagead/js/adsbygoogle.js"]');
+    const client=new URL(script.src).searchParams.get('client');
+    if(!/^\d+$/.test(config.adsense_slot_id))throw Error('ADSENSE_SLOT_ID must be a numeric display ad unit ID.');
+    if(config.adsense_client_id&&config.adsense_client_id!==client)throw Error('ADSENSE_CLIENT_ID must match the publisher ID in the page head.');
+    const unit=document.createElement('ins');
+    unit.className='adsbygoogle';unit.style.display='block';
+    unit.dataset.adClient=client;unit.dataset.adSlot=config.adsense_slot_id;
+    unit.dataset.adFormat='auto';unit.dataset.fullWidthResponsive='true';
+    slot.append(unit);slot.classList.remove('hidden');
+    (window.adsbygoogle=window.adsbygoogle||[]).push({});
+  }catch(error){slot.textContent=`Ad setup error: ${error.message}`;slot.classList.remove('hidden')}
+}
+window.addEventListener('error',event=>{
+  if(event.target?.matches?.('script[src*="/pagead/js/adsbygoogle.js"]')){
+    const message='AdSense could not load. Check the publisher setup or connection.';
+    const slot=$('#adsense-slot');slot.textContent=message;slot.classList.remove('hidden');
+    showToast(message);
+  }
+},true);
 function showToast(s){const t=$('#toast');t.textContent=s;t.classList.add('show');clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>t.classList.remove('show'),2600)}
 function setAuth(register=false){state.register=register;$('#auth-screen').classList.remove('hidden');$('#app').classList.add('hidden');$('#auth-title').textContent=register?'Create your account.':'Welcome back.';$('#auth-copy').textContent=register?'A calmer way to see your money starts here.':'Sign in to see your money clearly.';$('#auth-submit').innerHTML=(register?'Create account':'Sign in')+' <span>→</span>';$('#auth-switch').innerHTML=register?'Already have an account? <button type="button">Sign in</button>':'New to Budgeting? <button type="button">Create an account</button>';const password=$('#auth-form [type=password]');password.autocomplete=register?'new-password':'current-password';password.minLength=register?6:1;password.placeholder=register?'At least 6 characters':'Password';$('#auth-error').textContent=''}
 async function boot(){try{const d=await api('/api/me');if(!d.user)return setAuth();state.user=d.user;$('#auth-screen').classList.add('hidden');$('#app').classList.remove('hidden');$('#profile-email').textContent=d.user.email;$('#avatar').textContent=d.user.email[0].toUpperCase();const now=new Date();$('#date-label').textContent=now.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase();const h=now.getHours();$('#greeting-title').textContent=`Good ${h<12?'morning':h<18?'afternoon':'evening'}.`;loadAds();if(await refresh())await refreshQuotes()}catch(e){setAuth();$('#auth-error').textContent=e.message}}
