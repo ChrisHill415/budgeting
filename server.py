@@ -15,7 +15,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import date as calendar_date
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 ROOT = Path(__file__).parent
 
@@ -253,6 +253,30 @@ def init_db():
         ):
             if name not in investment_columns:
                 db.execute(f"ALTER TABLE investments ADD COLUMN {name} {declaration}")
+
+
+def investment_values(data):
+    symbol = str(data.get("symbol", "")).strip().upper()[:10]
+    name = str(data.get("name", "")).strip()[:60]
+    asset_type = str(data.get("asset_type", "stock")).strip().lower()
+    try:
+        shares = float(data.get("shares"))
+        price = round(float(data.get("purchase_price", data.get("price"))), 4)
+    except (ValueError, TypeError, OverflowError):
+        raise APIError(400, "Enter valid share and price values.")
+    purchase_date = str(data.get("purchase_date", calendar_date.today().isoformat()))
+    if asset_type not in ("stock", "etf", "bond"):
+        raise APIError(400, "Choose stock, ETF, or bond.")
+    if not symbol or not name or not math.isfinite(shares) or not math.isfinite(price) or shares <= 0 or price <= 0 or shares > 1e9 or price > 1e9:
+        raise APIError(400, "Check the investment details.")
+    if not re.fullmatch(r"[A-Z0-9.^=-]{1,15}", symbol):
+        raise APIError(400, "Enter a valid stock, ETF, or bond ticker.")
+    try:
+        if calendar_date.fromisoformat(purchase_date).isoformat() != purchase_date:
+            raise ValueError
+    except ValueError:
+        raise APIError(400, "Choose a valid purchase date.")
+    return {"symbol": symbol, "name": name, "shares": shares, "price": price, "asset_type": asset_type, "purchase_date": purchase_date}
 
 
 def supabase_auth(action, email, password):
@@ -572,26 +596,8 @@ class Handler(BaseHTTPRequestHandler):
                     cur = db.execute("INSERT INTO transactions(user_id,title,category,amount,kind,cadence,custom_frequency,date,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (user["id"], title, category or "Other", amount, kind, cadence, custom_frequency, date, int(time.time())))
                 return self.send_json(201, {"id": cur.lastrowid})
             if path == "/api/investments":
-                symbol = str(data.get("symbol", "")).strip().upper()[:10]
-                name = str(data.get("name", "")).strip()[:60]
-                asset_type = str(data.get("asset_type", "stock")).strip().lower()
-                try:
-                    shares = float(data.get("shares"))
-                    price = round(float(data.get("purchase_price", data.get("price"))), 4)
-                except (ValueError, TypeError, OverflowError):
-                    raise APIError(400, "Enter valid share and price values.")
-                purchase_date = str(data.get("purchase_date", calendar_date.today().isoformat()))
-                if asset_type not in ("stock", "etf", "bond"):
-                    raise APIError(400, "Choose stock, ETF, or bond.")
-                if not symbol or not name or not math.isfinite(shares) or not math.isfinite(price) or shares <= 0 or price <= 0 or shares > 1e9 or price > 1e9:
-                    raise APIError(400, "Check the investment details.")
-                if not re.fullmatch(r"[A-Z0-9.^=-]{1,15}", symbol):
-                    raise APIError(400, "Enter a valid stock, ETF, or bond ticker.")
-                try:
-                    if calendar_date.fromisoformat(purchase_date).isoformat() != purchase_date:
-                        raise ValueError
-                except ValueError:
-                    raise APIError(400, "Choose a valid purchase date.")
+                values = investment_values(data)
+                symbol, name, shares, price, asset_type, purchase_date = (values[key] for key in ("symbol", "name", "shares", "price", "asset_type", "purchase_date"))
                 if DATA_BACKEND == "supabase":
                     tokens = self.remote_tokens()
                     rows = supabase_data("investments", "POST", payload={"symbol": symbol, "name": name, "shares": shares, "price": price, "asset_type": asset_type, "purchase_date": purchase_date}, access_token=tokens["access"], prefer="return=representation")
@@ -643,6 +649,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlparse(self.path).path
         try:
+            investment_match = re.fullmatch(r"/api/investments/(\d+)", path)
+            if path == "/api/investments":
+                item_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+                investment_match = re.fullmatch(r"(\d+)", item_id)
+            if investment_match:
+                user = self.require_user()
+                investment_id = int(investment_match.group(1))
+                values = investment_values(self.body())
+                values.update({key: None for key in ("current_price", "quote_updated_at", "quote_as_of", "event_open_price", "event_open_checked_at")})
+                if DATA_BACKEND == "supabase":
+                    tokens = self.remote_tokens()
+                    rows = supabase_data("investments", "PATCH", query=f"id=eq.{investment_id}&select=id", payload=values, access_token=tokens["access"], prefer="return=representation")
+                    if not rows:
+                        raise APIError(404, "That investment was not found.")
+                else:
+                    with connect() as db:
+                        assignments = ",".join(f"{key}=?" for key in values)
+                        cur = db.execute(f"UPDATE investments SET {assignments} WHERE id=? AND user_id=?", (*values.values(), investment_id, user["id"]))
+                    if cur.rowcount == 0:
+                        raise APIError(404, "That investment was not found.")
+                return self.send_json(200, {"ok": True})
             match = re.fullmatch(r"/api/transactions/(\d+)", path)
             if not match:
                 raise APIError(404, "That API route was not found.")

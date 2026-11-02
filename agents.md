@@ -9,3 +9,4 @@ Include savings and show live updates if some money is tied up in stocks.
 - Laptop first.
 - Show every error to the user. Do not log and continue.
 - Ask before you add a dependency.
+- Automatically deploy every completed change to the linked Vercel production project after relevant checks pass, and verify the live deployment. Do not ask for deployment confirmation again.

@@ -8,7 +8,7 @@ const finance = globalThis.LedgerlyFinance;
 function dashboard() {
   const elements = new Map();
   const element = selector => {
-    if (!elements.has(selector)) elements.set(selector, {value: selector === '#period' ? 'month' : '', innerHTML: '', textContent: '', style: {}, classList: {add() {}, remove() {}}, querySelector() {return null;}});
+    if (!elements.has(selector)) elements.set(selector, {value: selector === '#period' ? 'month' : '', innerHTML: '', textContent: '', style: {}, classList: {add() {}, remove() {}}, querySelector() {return null;}, querySelectorAll() {return [];}});
     return elements.get(selector);
   };
   const context = vm.createContext({

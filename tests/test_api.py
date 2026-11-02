@@ -62,6 +62,26 @@ class APITestCase(unittest.TestCase):
         self.assertIn('id="auth-form"', app)
         self.assertIn('src="/app.js"', app)
 
+    def test_investment_edit_validates_and_updates_owned_holding(self):
+        cookie = self.create_account()
+        details = {"symbol": "VTI", "name": "Fund", "shares": 2, "purchase_price": 100, "asset_type": "etf", "purchase_date": "2026-10-01"}
+        status, created, _ = self.request("POST", "/api/investments", details, {"Cookie": cookie})
+        self.assertEqual(status, 201, created)
+        path = f"/api/investments?id={created['id']}"
+        details.update(shares=3, purchase_price=120)
+        status, result, _ = self.request("PUT", path, details, {"Cookie": cookie})
+        self.assertEqual(status, 200, result)
+        status, overview, _ = self.request("GET", "/api/overview", headers={"Cookie": cookie})
+        self.assertEqual(overview["investments"][0]["shares"], 3)
+        self.assertEqual(overview["investments"][0]["price"], 120)
+        self.assertIsNone(overview["investments"][0]["current_price"])
+        status, _, _ = self.request("PUT", path, {**details, "shares": -1}, {"Cookie": cookie})
+        self.assertEqual(status, 400)
+        status, _, _ = self.request("PUT", "/api/investments/99999", details, {"Cookie": cookie})
+        self.assertEqual(status, 404)
+        status, _, _ = self.request("PUT", path, details)
+        self.assertEqual(status, 401)
+
     def test_missing_supabase_table_returns_schema_setup_instructions(self):
         error = urllib.error.HTTPError(
             "https://example.supabase.co/rest/v1/transactions", 404, "Not Found", {},
@@ -283,6 +303,12 @@ class APITestCase(unittest.TestCase):
                 return [{"id": 33}]
             if path == "/rest/v1/investments" and method == "POST":
                 return [{"id": 44}]
+            if path == "/rest/v1/investments?id=eq.44&select=id" and method == "PATCH":
+                self.assertEqual(payload["shares"], 3)
+                self.assertIsNone(payload["current_price"])
+                return [{"id": 44}]
+            if path == "/rest/v1/investments?id=eq.44&select=id" and method == "DELETE":
+                return [{"id": 44}]
             if path == "/rest/v1/settings?on_conflict=user_id" and method == "POST":
                 return {}
             if path == "/rest/v1/transactions?id=eq.33&select=id" and method == "DELETE":
@@ -314,6 +340,11 @@ class APITestCase(unittest.TestCase):
             status, payload, _ = self.request("POST", "/api/investments", investment, {"Cookie": cookie})
             self.assertEqual(status, 201, payload)
             self.assertEqual(payload["id"], 44)
+
+            status, payload, _ = self.request("PUT", "/api/investments?id=44", {**investment, "shares": 3}, {"Cookie": cookie})
+            self.assertEqual(status, 200, payload)
+            status, payload, _ = self.request("POST", "/api/delete", {"kind": "investment", "id": 44}, {"Cookie": cookie})
+            self.assertEqual(status, 200, payload)
 
             status, payload, _ = self.request("POST", "/api/budget", {"amount": 2500}, {"Cookie": cookie})
             self.assertEqual(status, 200, payload)
